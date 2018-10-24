@@ -54,6 +54,10 @@
   name = "github.com/gcash/bchutil"
 
 [[constraint]]
+  branch = "paymentchannel"
+  name = "github.com/gcash/bchwallet"
+
+[[constraint]]
   branch = "master"
   name = "github.com/jessevdk/go-flags"
 
