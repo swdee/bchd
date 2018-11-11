@@ -5,10 +5,12 @@
 package netsync
 
 import (
+	"fmt"
 	"math"
 	"sync"
 	"time"
 
+	"github.com/gcash/bchd/blockchain"
 	"github.com/gcash/bchlog"
 	"github.com/gcash/bchutil"
 )
@@ -41,7 +43,7 @@ func newBlockProgressLogger(progressMessage string, logger bchlog.Logger) *block
 // LogBlockHeight logs a new block height as an information message to show
 // progress to the user. In order to prevent spam, it limits logging to one
 // message every 10 seconds with duration and totals included.
-func (b *blockProgressLogger) LogBlockHeight(block *bchutil.Block, bestHeight uint64) {
+func (b *blockProgressLogger) LogBlockHeight(block *bchutil.Block, bestHeight uint64, chain *blockchain.BlockChain) {
 	b.Lock()
 	defer b.Unlock()
 
@@ -69,13 +71,26 @@ func (b *blockProgressLogger) LogBlockHeight(block *bchutil.Block, bestHeight ui
 	}
 
 	progress := float64(0.0)
+
 	if bestHeight > 0 {
 		progress = math.Min(float64(block.Height())/float64(bestHeight), 1.0) * 100
 	}
 
-	b.subsystemLogger.Infof("%s %d %s in the last %s (%d %s, height %d of %d, progress %.2f%%, %s)",
+	var heightStr string
+
+	if uint64(block.Height()) >= bestHeight {
+		// sync is up to date so shorten the height output
+		heightStr = fmt.Sprintf("%d (%.2f%%)", block.Height(), progress)
+	} else {
+		// sync is partial and in progress
+		heightStr = fmt.Sprintf("%d/%d (%.2f%%)", block.Height(),
+			bestHeight, progress)
+	}
+
+	cacheSizeStr := fmt.Sprintf("~%d MiB", chain.CachedStateSize()/1024/1024)
+	b.subsystemLogger.Infof("%s %d %s in %s (%d %s, height %s, %s, %s cache)",
 		b.progressAction, b.receivedLogBlocks, blockStr, tDuration, b.receivedLogTx,
-		txStr, block.Height(), bestHeight, progress, block.MsgBlock().Header.Timestamp)
+		txStr, heightStr, block.MsgBlock().Header.Timestamp, cacheSizeStr)
 
 	b.receivedLogBlocks = 0
 	b.receivedLogTx = 0

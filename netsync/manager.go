@@ -161,7 +161,6 @@ type syncPeerState struct {
 	lastBlockTime     time.Time
 	violations        int
 	ticks             uint64
-	syncHeight        uint64
 }
 
 // validNetworkSpeed checks if the peer is slow and
@@ -379,7 +378,6 @@ func (sm *SyncManager) startSync() {
 			lastBlockTime:     time.Now(),
 			recvBytes:         bestPeer.BytesReceived(),
 			recvBytesLastTick: uint64(0),
-			syncHeight:        uint64(bestPeer.LastBlock()),
 		}
 	} else {
 		log.Warnf("No sync peer candidates available")
@@ -392,7 +390,7 @@ func (sm *SyncManager) SyncHeight() uint64 {
 		return 0
 	}
 
-	return sm.syncPeerState.syncHeight
+	return uint64(sm.topBlock())
 }
 
 // isSyncCandidate returns whether or not the peer is a candidate to consider
@@ -465,7 +463,8 @@ func (sm *SyncManager) handleCheckSyncPeer() {
 	// Update network stats at the end of this tick.
 	defer sm.syncPeerState.updateNetwork(sm.syncPeer)
 
-	// Check network speed of the sync peer and its last block time.
+	// Check network speed of the sync peer and its last block time. If we're currently
+	// flushing the cache skip this round.
 	if (sm.syncPeerState.validNetworkSpeed(sm.minSyncPeerNetworkSpeed) < maxNetworkViolations) &&
 		(time.Since(sm.syncPeerState.lastBlockTime) <= maxLastBlockTime) {
 		return
@@ -473,15 +472,10 @@ func (sm *SyncManager) handleCheckSyncPeer() {
 
 	// Don't update sync peers if you have all the available
 	// blocks.
-	var topBlock int32
-	if sm.syncPeer.LastBlock() > sm.syncPeer.StartingHeight() {
-		topBlock = sm.syncPeer.LastBlock()
-	} else {
-		topBlock = sm.syncPeer.StartingHeight()
-	}
 
 	best := sm.chain.BestSnapshot()
-	if topBlock == best.Height {
+
+	if sm.topBlock() == best.Height || sm.chain.UtxoCacheFlushInProgress() {
 		// Update the time and violations to prevent disconnects.
 		sm.syncPeerState.lastBlockTime = time.Now()
 		sm.syncPeerState.violations = 0
@@ -495,6 +489,16 @@ func (sm *SyncManager) handleCheckSyncPeer() {
 
 	sm.clearRequestedState(state)
 	sm.updateSyncPeer(state)
+}
+
+// topBlock returns the best chains top block height
+func (sm *SyncManager) topBlock() int32 {
+
+	if sm.syncPeer.LastBlock() > sm.syncPeer.StartingHeight() {
+		return sm.syncPeer.LastBlock()
+	}
+
+	return sm.syncPeer.StartingHeight()
 }
 
 // handleDonePeerMsg deals with peers that have signalled they are done.  It
@@ -782,7 +786,7 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockMsg) {
 
 		// When the block is not an orphan, log information about it and
 		// update the chain state.
-		sm.progressLogger.LogBlockHeight(bmsg.block, sm.SyncHeight())
+		sm.progressLogger.LogBlockHeight(bmsg.block, sm.SyncHeight(), sm.chain)
 
 		// Update this peer's latest block height, for future
 		// potential sync node candidacy.
@@ -806,8 +810,13 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockMsg) {
 		}
 	}
 
-	// Nothing more to do if we aren't in headers-first mode.
+	// If we are not in headers first mode, it's a good time to periodically
+	// flush the blockchain cache because we don't expect new blocks immediately.
+	// After that, there is nothing more to do.
 	if !sm.headersFirstMode {
+		if err := sm.chain.FlushCachedState(blockchain.FlushPeriodic); err != nil {
+			log.Errorf("Error while flushing the blockchain cache: %v", err)
+		}
 		return
 	}
 
@@ -1357,6 +1366,10 @@ out:
 		case <-sm.quit:
 			break out
 		}
+	}
+	log.Debug("Block handler shutting down: flushing blockchain caches...")
+	if err := sm.chain.FlushCachedState(blockchain.FlushRequired); err != nil {
+		log.Errorf("Error while flushing blockchain caches: %v", err)
 	}
 
 	sm.wg.Done()
