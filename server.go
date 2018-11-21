@@ -70,6 +70,9 @@ var (
 	userAgentVersion = fmt.Sprintf("%d.%d.%d", version.AppMajor, version.AppMinor, version.AppPatch)
 )
 
+// addrMe specifies the server address to send peers.
+var addrMe *wire.NetAddress
+
 // zeroHash is the zero value hash (all zeros).  It is defined as a convenience.
 var zeroHash chainhash.Hash
 
@@ -430,6 +433,13 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 		return nil
 	}
 
+	// Do not allow connections to Bitcoin SV peers
+	if strings.Contains(msg.UserAgent, "Bitcoin SV") {
+		srvrLog.Debugf("Rejecting peer %s for running Bitcoin SV", sp.Peer)
+		reason := fmt.Sprint("Not Bitcoin Cash node")
+		return wire.NewMsgReject(msg.Command(), wire.RejectNonstandard, reason)
+	}
+
 	// Reject outbound peers that are not full nodes.
 	wantServices := wire.SFNodeNetwork
 	if !isInbound && !hasServices(msg.Services, wantServices) {
@@ -742,6 +752,18 @@ func (sp *serverPeer) OnGetBlocks(_ *peer.Peer, msg *wire.MsgGetBlocks) {
 			sp.continueHash = &continueHash
 		}
 		sp.QueueMessage(invMsg, nil)
+	} else if sp.server.chain.PruneMode() {
+		// Typically nodes will just not respond to a GetBlocks message
+		// if they don't have any blocks. However, since we are implementing
+		// NodeNetworkLimited we need a better way to communicate to the remote
+		// peer that we don't have that portion of the chain than just letting
+		// the request timeout. So for this purpose we will respond with a
+		// not found message.
+		notFound := wire.NewMsgNotFound()
+		for _, inv := range invMsg.InvList {
+			notFound.AddInvVect(inv)
+		}
+		sp.QueueMessage(notFound, nil)
 	}
 }
 
@@ -1989,13 +2011,8 @@ func newPeerConfig(sp *serverPeer) *peer.Config {
 			OnWrite:        sp.OnWrite,
 			OnReject:       sp.OnReject,
 			OnNotFound:     sp.OnNotFound,
-
-			// Note: The reference client currently bans peers that send alerts
-			// not signed with its key.  We could verify against their key, but
-			// since the reference client is currently unwilling to support
-			// other implementations' alert messages, we will not relay theirs.
-			OnAlert: nil,
 		},
+		AddrMe:            addrMe,
 		NewestBlock:       sp.newestBlock,
 		HostToNetAddress:  sp.server.addrManager.HostToNetAddress,
 		Proxy:             cfg.Proxy,
@@ -2183,8 +2200,6 @@ func (s *server) RelayInventory(invVect *wire.InvVect, data interface{}) {
 // BroadcastMessage sends msg to all peers currently connected to the server
 // except those in the passed peers to exclude.
 func (s *server) BroadcastMessage(msg wire.Message, exclPeers ...*serverPeer) {
-	// XXX: Need to determine if this is an alert that has already been
-	// broadcast and refrain from broadcasting again.
 	bmsg := broadcastMsg{message: msg, excludePeers: exclPeers}
 	s.broadcast <- bmsg
 }
@@ -2565,6 +2580,10 @@ func newServer(listenAddrs []string, db database.DB, chainParams *chaincfg.Param
 	if cfg.NoCFilters {
 		services &^= wire.SFNodeCF
 	}
+	if cfg.Prune {
+		services &^= wire.SFNodeNetwork
+		services |= wire.SFNodeNetworkLimited
+	}
 
 	amgr := addrmgr.New(cfg.DataDir, bchdLookup)
 
@@ -2660,6 +2679,8 @@ func newServer(listenAddrs []string, db database.DB, chainParams *chaincfg.Param
 		IndexManager:       indexManager,
 		HashCache:          s.hashCache,
 		ExcessiveBlockSize: cfg.ExcessiveBlockSize,
+		Prune:              cfg.Prune,
+		PruneDepth:         cfg.PruneDepth,
 	})
 	if err != nil {
 		return nil, err
@@ -2903,14 +2924,13 @@ func initListeners(amgr *addrmgr.AddrManager, listenAddrs []string, services wir
 	}
 
 	var nat NAT
+	defaultPort, err := strconv.ParseUint(activeNetParams.DefaultPort, 10, 16)
+	if err != nil {
+		srvrLog.Errorf("Can not parse default port %s for active chain: %v",
+			activeNetParams.DefaultPort, err)
+		return nil, nil, err
+	}
 	if len(cfg.ExternalIPs) != 0 {
-		defaultPort, err := strconv.ParseUint(activeNetParams.DefaultPort, 10, 16)
-		if err != nil {
-			srvrLog.Errorf("Can not parse default port %s for active chain: %v",
-				activeNetParams.DefaultPort, err)
-			return nil, nil, err
-		}
-
 		for _, sip := range cfg.ExternalIPs {
 			eport := uint16(defaultPort)
 			host, portstr, err := net.SplitHostPort(sip)
@@ -2932,6 +2952,13 @@ func initListeners(amgr *addrmgr.AddrManager, listenAddrs []string, services wir
 				continue
 			}
 
+			// Found a valid external IP, make sure we use these details
+			// so peers get the correct IP information. Since we can only
+			// advertise one IP, use the first seen.
+			if addrMe == nil {
+				addrMe = na
+			}
+
 			err = amgr.AddLocalAddress(na, addrmgr.ManualPrio)
 			if err != nil {
 				amgrLog.Warnf("Skipping specified external IP: %v", err)
@@ -2945,6 +2972,22 @@ func initListeners(amgr *addrmgr.AddrManager, listenAddrs []string, services wir
 				srvrLog.Warnf("Can't discover upnp: %v", err)
 			}
 			// nil nat here is fine, just means no upnp on network.
+
+			// Found a valid external IP, make sure we use these details
+			// so peers get the correct IP information.
+			if nat != nil {
+				addr, err := nat.GetExternalAddress()
+				if err == nil {
+					eport := uint16(defaultPort)
+					na, err := amgr.HostToNetAddress(addr.String(), eport, services)
+					if err == nil {
+						if addrMe == nil {
+							addrMe = na
+						}
+					}
+
+				}
+			}
 		}
 
 		// Add bound addresses to address manager to be advertised to peers.

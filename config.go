@@ -31,6 +31,7 @@ import (
 	"github.com/gcash/bchd/peer"
 	"github.com/gcash/bchd/version"
 	"github.com/gcash/bchutil"
+
 	flags "github.com/jessevdk/go-flags"
 )
 
@@ -64,6 +65,8 @@ const (
 	defaultAddrIndex               = false
 	defaultUtxoCacheMaxSizeMiB     = 450
 	defaultMinSyncPeerNetworkSpeed = 51200
+	defaultPruneDepth              = 4320
+	minPruneDepth                  = 288
 )
 
 var (
@@ -141,7 +144,6 @@ type config struct {
 	NoOnion                 bool          `long:"noonion" description:"Disable connecting to tor hidden services"`
 	TorIsolation            bool          `long:"torisolation" description:"Enable Tor stream isolation by randomizing user credentials for each connection."`
 	TestNet3                bool          `long:"testnet" description:"Use the test network"`
-	TestNet1                bool          `long:"testnet1" description:"Use the testnet1 network"`
 	RegressionTest          bool          `long:"regtest" description:"Use the regression test network"`
 	SimNet                  bool          `long:"simnet" description:"Use the simulation test network"`
 	AddCheckpoints          []string      `long:"addcheckpoint" description:"Add a custom checkpoint.  Format: '<height>:<hash>'"`
@@ -175,6 +177,8 @@ type config struct {
 	DropAddrIndex           bool          `long:"dropaddrindex" description:"Deletes the address-based transaction index from the database on start up and then exits."`
 	RelayNonStd             bool          `long:"relaynonstd" description:"Relay non-standard transactions regardless of the default settings for the active network."`
 	RejectNonStd            bool          `long:"rejectnonstd" description:"Reject non-standard transactions regardless of the default settings for the active network."`
+	Prune                   bool          `long:"prune" description:"Delete historical blocks from the chain. A buffer of blocks will be retained in case of a reorg."`
+	PruneDepth              uint32        `long:"prunedepth" description:"The number of blocks to retain when running in pruned mode. Cannot be less than 288."`
 	lookup                  func(string) ([]net.IP, error)
 	oniondial               func(string, string, time.Duration) (net.Conn, error)
 	dial                    func(string, string, time.Duration) (net.Conn, error)
@@ -443,6 +447,7 @@ func loadConfig() (*config, []string, error) {
 		Generate:                defaultGenerate,
 		TxIndex:                 defaultTxIndex,
 		AddrIndex:               defaultAddrIndex,
+		PruneDepth:              defaultPruneDepth,
 	}
 
 	// Service options which are only added on Windows.
@@ -560,11 +565,6 @@ func loadConfig() (*config, []string, error) {
 		activeNetParams = &simNetParams
 		cfg.DisableDNSSeed = true
 	}
-	if cfg.TestNet1 {
-		numNets++
-		activeNetParams = &testNet1Params
-		cfg.DisableDNSSeed = true
-	}
 	if numNets > 1 {
 		str := "%s: The testnet, regtest, segnet, and simnet params " +
 			"can't be used together -- choose one of the four"
@@ -652,6 +652,14 @@ func loadConfig() (*config, []string, error) {
 	if cfg.BanDuration < time.Second {
 		str := "%s: The banduration option may not be less than 1s -- parsed [%v]"
 		err := fmt.Errorf(str, funcName, cfg.BanDuration)
+		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, usageMessage)
+		return nil, nil, err
+	}
+
+	if cfg.Prune && cfg.PruneDepth < minPruneDepth {
+		str := "%s: The pruneheight option may not be less than %d -- parsed [%d]"
+		err := fmt.Errorf(str, minPruneDepth, funcName, cfg.PruneDepth)
 		fmt.Fprintln(os.Stderr, err)
 		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
