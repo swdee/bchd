@@ -20,10 +20,14 @@ import (
 var (
 	errNegativeValue          = errors.New("value may be interpreted as negative")
 	errExcessivelyPaddedValue = errors.New("value is excessively padded")
+
+	// EC verify function for calling CGO sipa library
+	EC_Verify func(k, s, h []byte) bool
 )
 
 // Signature is a type representing an ecdsa signature.
 type Signature struct {
+	sigStr []byte
 	R *big.Int
 	S *big.Int
 }
@@ -74,6 +78,13 @@ func (sig *Signature) Serialize() []byte {
 // Verify calls ecdsa.Verify to verify the signature of hash using the public
 // key.  It returns true if the signature is valid, false otherwise.
 func (sig *Signature) Verify(hash []byte, pubKey *PublicKey) bool {
+
+	if EC_Verify != nil {
+		// use CGO/sipasec library
+		return EC_Verify(pubKey.SerializeUncompressed(), sig.sigStr, hash)
+	}
+
+	// default to golang implementation
 	return ecdsa.Verify(pubKey.ToECDSA(), hash, sig.R, sig.S)
 }
 
@@ -101,7 +112,9 @@ func parseSig(sigStr []byte, curve elliptic.Curve, der bool) (*Signature, error)
 	// 0x30 <length of whole message> <0x02> <length of R> <R> 0x2
 	// <length of S> <S>.
 
-	signature := &Signature{}
+	signature := &Signature{
+		sigStr: sigStr,
+	}
 
 	if len(sigStr) < minSigLen {
 		return nil, errors.New("malformed signature: too short")
