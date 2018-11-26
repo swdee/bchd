@@ -1,8 +1,8 @@
 package main
 
 import(
-	"github.com/gcash/bchd/bchec"
-	"github.com/gcash/bchd/bchec/cgo/sipasec"
+	"github.com/swdee/bchd/bchec"
+	"github.com/swdee/bchd/bchec/cgo/sipasec"
 	"fmt"
 )
 
